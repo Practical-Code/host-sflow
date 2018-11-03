@@ -228,11 +228,12 @@ extern "C" {
     } link_modes;
   };
 
-  static bool ethtool_get_GLINKSETTINGS(HSP *sp, struct ifreq *ifr, int fd, SFLAdaptor *adaptor)
+  static bool ethtool_get_GLINKSETTINGS(HSP *sp, struct ifreq *ifr, int fd, SFLAdaptor *adaptor, bool *sysCallOK)
   {
     // Try to get the ethtool info for this interface so we can infer the
     // ifDirection and ifSpeed. Learned from openvswitch (http://www.openvswitch.org).
-    int changed = NO;
+    bool changed = NO;
+    (*sysCallOK) = NO;
     int err;
     struct {
       struct ethtool_link_settings req;
@@ -266,6 +267,9 @@ extern "C" {
 	return NO;
       }
 
+      // indicate to caller that this has worked
+      (*sysCallOK) = YES;
+
       uint32_t direction = ecmd.req.duplex ? 1 : 2;
       if(direction != adaptor->ifDirection) {
 	changed = YES;
@@ -281,21 +285,22 @@ extern "C" {
         if(adaptor->ifSpeed != 0) {
           changed = YES;
         }
-        setAdaptorSpeed(sp, adaptor, 0);
+        setAdaptorSpeed(sp, adaptor, 0, "ETHTOOL_GLINKSETTINGS1");
       }
       else {
         uint64_t ifSpeed_bps = ifSpeed_mb * 1000000;
         if(adaptor->ifSpeed != ifSpeed_bps) {
           changed = YES;
         }
-        setAdaptorSpeed(sp, adaptor, ifSpeed_bps);
+        setAdaptorSpeed(sp, adaptor, ifSpeed_bps, "ETHTOOL_GLINKSETTINGS2");
       }
     }
     return changed;
   }
 
-#else /* ETHTOOL_GLINKSETTINGS */
+#endif /* ETHTOOL_GLINKSETTINGS */
 
+#ifdef ETHTOOL_GSET
 /*________________--------------------------__________________
   ________________  ethtool_get_GSET        __________________
   ----------------__________________________------------------
@@ -325,20 +330,20 @@ extern "C" {
 	if(adaptor->ifSpeed != 0) {
 	  changed = YES;
 	}
-	setAdaptorSpeed(sp, adaptor, 0);
+	setAdaptorSpeed(sp, adaptor, 0, "ETHTOOL_GSET1");
       }
       else {
 	uint64_t ifSpeed_bps = ifSpeed_mb * 1000000;
 	if(adaptor->ifSpeed != ifSpeed_bps) {
 	  changed = YES;
 	}
-	setAdaptorSpeed(sp, adaptor, ifSpeed_bps);
+	setAdaptorSpeed(sp, adaptor, ifSpeed_bps, "ETHTOOL_GSET2");
       }
     }
     return changed;
   }
 
-#endif /* not ETHTOOL_GLINKSETTINGS */
+#endif /* ETHTOOL_GSET */
 
 #if ( HSP_OPTICAL_STATS && ETHTOOL_GMODULEINFO )
 
@@ -528,12 +533,17 @@ extern "C" {
     }
 #endif
 
+    // GLINKSETTINGS should eventually take over from GSET
+    bool glinkSettingsOK = NO;
 #ifdef ETHTOOL_GLINKSETTINGS
     if(nio->ethtool_GLINKSETTINGS) {
-      changed |= ethtool_get_GLINKSETTINGS(sp, ifr, fd, adaptor);
+      changed |= ethtool_get_GLINKSETTINGS(sp, ifr, fd, adaptor, &glinkSettingsOK);
     }
-#else
-    if(nio->ethtool_GSET) {
+#endif
+
+#ifdef ETHTOOL_GSET
+    // But fall back on GSET if the GLINKSETTINGS syscall fails (e.g. Debian 9)
+    if(glinkSettingsOK==NO && nio->ethtool_GSET) {
       changed |= ethtool_get_GSET(sp, ifr, fd, adaptor);
     }
 #endif
@@ -571,7 +581,7 @@ extern "C" {
       myDebug(3, "detectInterfaceChange: testing %s", ad->deviceName);
       struct ifreq ifr;
       memset(&ifr, 0, sizeof(ifr));
-      strncpy(ifr.ifr_name, ad->deviceName, sizeof(ifr.ifr_name));
+      strncpy(ifr.ifr_name, ad->deviceName, sizeof(ifr.ifr_name)-1);
       if(ioctl(fd,SIOCGIFFLAGS, &ifr) < 0) {
 	myDebug(1, "device %s Get SIOCGIFFLAGS failed : %s",
 		ad->deviceName,
@@ -643,7 +653,7 @@ extern "C" {
       int devNameLen = my_strlen(devName);
       if(devNameLen == 0 || devNameLen >= IFNAMSIZ) continue;
       // we set the ifr_name field to make our queries
-      strncpy(ifr.ifr_name, devName, sizeof(ifr.ifr_name));
+      strncpy(ifr.ifr_name, devName, sizeof(ifr.ifr_name)-1);
 
       myDebug(3, "reading interface %s", devName);
 
@@ -837,6 +847,18 @@ extern "C" {
 
   return sp->adaptorsByName->entries;
 }
+
+/*________________---------------------------__________________
+  ________________   isLocalAddress          __________________
+  ----------------___________________________------------------
+*/
+  bool isLocalAddress(HSP *sp, SFLAddress *addr) {
+    UTHash *localHT = (addr->type == SFLADDRESSTYPE_IP_V6)
+      ? sp->localIP6
+      : sp->localIP;
+    return (UTHashGet(localHT, addr) != NULL);
+  }
+  
 
 #if defined(__cplusplus)
 } /* extern "C" */

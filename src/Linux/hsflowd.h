@@ -276,7 +276,6 @@ extern "C" {
     bool bond_master:1;
     bool bond_slave:1;
     bool switchPort:1;
-    bool os10Port:1;
     bool opxPort:1;
     bool vm_or_container:1;
     bool modinfo_tested:1;
@@ -368,6 +367,19 @@ extern "C" {
     SFLSampler *sampler;
     int refCount;
     UTArray *ptrsToFree;
+    // header decode
+    int ipversion;
+    uint8_t *hdr;
+    SFLAddress src;
+    SFLAddress dst;
+    int l3_offset;
+    int l4_offset;
+    uint8_t ipproto;
+    bool decoded:1;
+    // local address test
+    bool localTest:1;
+    bool localSrc:1;
+    bool localDst:1;
   } HSPPendingSample;
 
   typedef enum {
@@ -414,7 +426,6 @@ extern "C" {
     // config settings
     HSPSFlowSettings *sFlowSettings_file;
     HSPSFlowSettings *sFlowSettings_dyn;
-    HSPSFlowSettings *sFlowSettings_dyn_prev;
     HSPSFlowSettings *sFlowSettings;
     char *sFlowSettings_str;
 
@@ -468,14 +479,6 @@ extern "C" {
       bool ovs;
     } ovs;
     struct {
-      bool os10;
-      uint32_t port; // UDP port for hw samples
-      char *swp_regex_str;
-      regex_t *swp_regex;
-      HSPPort *ports; // alternative way to list switch ports
-      uint32_t numPorts;
-    } os10;
-    struct {
       bool opx;
       uint32_t port; // UDP port for hw samples
       char *swp_regex_str;
@@ -517,6 +520,7 @@ extern "C" {
       bool dropPriv;
       char *cgroup_procs;
       char *cgroup_acct;
+      bool markTraffic;
     } systemd;
     struct {
       bool eapi;
@@ -626,6 +630,7 @@ extern "C" {
   // read functions
   bool detectInterfaceChange(HSP *sp);
   int readInterfaces(HSP *sp, bool full_discovery, uint32_t *p_added, uint32_t *p_removed, uint32_t *p_cameup, uint32_t *p_wentdown, uint32_t *p_changed);
+  bool isLocalAddress(HSP *sp, SFLAddress *addr);
   const char *devTypeName(EnumHSPDevType devType);
   int readCpuCounters(SFLHost_cpu_counters *cpu);
   int readMemoryCounters(SFLHost_mem_counters *mem);
@@ -667,7 +672,7 @@ extern "C" {
   int deleteMarkedAdaptors_adaptorList(HSP *sp, SFLAdaptorList *adList);
   char *adaptorStr(SFLAdaptor *ad, char *buf, int bufLen);
   void adaptorHTPrint(UTHash *ht, char *prefix);
-  void setAdaptorSpeed(HSP *sp, SFLAdaptor *adaptor, uint64_t speed);
+  void setAdaptorSpeed(HSP *sp, SFLAdaptor *adaptor, uint64_t speed, char *method);
 
   // readPackets.c
 #define HSP_SAMPLEOPT_BRIDGE      0x0001
@@ -678,7 +683,6 @@ extern "C" {
 #define HSP_SAMPLEOPT_ULOG        0x0020
 #define HSP_SAMPLEOPT_NFLOG       0x0040
 #define HSP_SAMPLEOPT_PCAP        0x0080
-#define HSP_SAMPLEOPT_OS10        0x0100
 #define HSP_SAMPLEOPT_CUMULUS     0x0200
 #define HSP_SAMPLEOPT_INGRESS     0x0400
 #define HSP_SAMPLEOPT_EGRESS      0x0800
@@ -690,11 +694,15 @@ extern "C" {
   void *pendingSample_calloc(HSPPendingSample *ps, size_t len);
   void holdPendingSample(HSPPendingSample *ps);
   void releasePendingSample(HSP *sp, HSPPendingSample *ps);
+  int decodePendingSample(HSPPendingSample *ps);
   SFLPoller *forceCounterPolling(HSP *sp, SFLAdaptor *adaptor);
 
   // VM lifecycle
   HSPVMState *getVM(EVMod *mod, char *uuid, bool create, size_t objSize, EnumVMType vmType, getCountersFn_t getCountersFn);
   void removeAndFreeVM(EVMod *mod, HSPVMState *state);
+
+  // logging support
+  void log_backtrace(int sig, siginfo_t *info);
 
 #if defined(__cplusplus)
 } /* extern "C" */

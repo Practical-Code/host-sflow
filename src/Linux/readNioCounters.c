@@ -141,7 +141,7 @@ extern "C" {
 	      // already marked as a switchPort then do not start treating it as one.
 	      // This is not necessarily an error.  A regular server may enable traffic
 	      // monitoring on a bond interface without intending to get separate
-	      // counters for the components too.  Log is as a warning when debugging.
+	      // counters for the components too.  Log as a warning when debugging.
 	      if(bond_nio->switchPort && !slave_nio->switchPort)
 		myDebug(1, "updateBondCounters: warning: bond %s slave %s not marked as switchPort",
 			bond->deviceName,
@@ -768,6 +768,22 @@ extern "C" {
 	      delta.bytes_out,
 	      delta.pkts_in,
 	      delta.pkts_out);
+
+	if(debug(2)) {
+	  myDebug(1, "old=[%"PRIu64",%"PRIu64",%u,%u]",
+		  nio->last_nio.bytes_in,
+		  nio->last_nio.bytes_out,
+		  nio->last_nio.pkts_in,
+		  nio->last_nio.pkts_out);
+	  myDebug(1, "new=[%"PRIu64",%"PRIu64",%u,%u]",
+		  ctrs->bytes_in,
+		  ctrs->bytes_out,
+		  ctrs->pkts_in,
+		  ctrs->pkts_out);
+	  myDebug(1, "logging backtrace...");
+	  log_backtrace(0, NULL);
+	}
+
 	accumulate = NO;
       }
       if(et_delta.mcasts_in > HSP_MAX_NIO_DELTA64  ||
@@ -927,7 +943,7 @@ extern "C" {
 	      et_stats->n_stats = niostate->et_nctrs;
 
 	      // now issue the ioctl
-	      strncpy(ifr.ifr_name, adaptor->deviceName, sizeof(ifr.ifr_name));
+	      strncpy(ifr.ifr_name, adaptor->deviceName, sizeof(ifr.ifr_name)-1);
 	      ifr.ifr_data = (char *)et_stats;
 	      if(ioctl(fd, SIOCETHTOOL, &ifr) >= 0) {
 		if(getDebug() > 2) {

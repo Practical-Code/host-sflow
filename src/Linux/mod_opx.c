@@ -30,6 +30,28 @@ extern "C" {
 
 #define HSP_MAX_EXEC_LINELEN 1024
 
+  // lookup table copied from nas_os_if_utils.py
+  static uint32_t opx_yang_speed_map_mbps[] = {
+    0,
+    10,     // 10Mbps
+    100,    // 100 Mbps
+    1000,   // 1Gbps
+    10000,  // 10Gbps
+    25000,  // 25 Gbps
+    40000,  // 40Gbps
+    100000, // 100Gbps
+    0,      // default speed
+    20000,  // 20 Gbps
+    50000,  // 50 Gbps
+    200000, // 200 Gbps
+    400000, // 400 Gbps
+    4000,   // 4GFC
+    8000,   // 8 GFC
+    16000,  // 16 GFC
+    32000   // 32 GFC
+  };
+#define OPX_YANG_SPEED_MAP_MAXINDEX 16
+
   typedef struct _HSP_mod_OPX {
     // active on two threads (buses)
     EVBus *packetBus;
@@ -156,7 +178,7 @@ extern "C" {
 	dev_out = adaptorByIndex(sp, ifOut);
 
       if(dev_in == NULL
-	 || ADAPTOR_NIO(dev_in)->sampling_n_set == 0) {
+	 /* || ADAPTOR_NIO(dev_in)->sampling_n_set == 0*/) {
 	// sampling not configured yet - may have just
 	// restarted hsflowd
 	continue;
@@ -212,6 +234,7 @@ extern "C" {
 
   static bool CPSSetSampleUDPPort(EVMod *mod) {
     HSP *sp = (HSP *)EVROOTDATA(mod);
+    cps_api_return_code_enum_val_t status;
     bool ok = NO;
     uint16_t udpPort =  sp->opx.port ?: HSP_DEFAULT_OPX_PORT;
     // prepare transaction
@@ -228,11 +251,15 @@ extern "C" {
     cps_api_object_attr_add(obj, BASE_SFLOW_SOCKET_ADDRESS_UDP_PORT, ip, 4);
     cps_api_object_attr_add_u16(obj, BASE_SFLOW_SOCKET_ADDRESS_UDP_PORT, udpPort);
     // add "set" action to transaction
-    if(cps_api_set(&tran,obj) != cps_api_ret_code_OK )
+    if((status = cps_api_set(&tran,obj)) != cps_api_ret_code_OK ) {
+      myDebug(1, "CPSSetSampleUDPPort: cps_api_set failed (status=%d)", status);
       goto out;
+    }
     // commit
-    if(cps_api_commit(&tran) != cps_api_ret_code_OK )
+    if((status = cps_api_commit(&tran)) != cps_api_ret_code_OK ) {
+      myDebug(1, "CPSSetSampleUDPPort: cps_api_commit failed (status=%d)", status);
       goto out;
+    }
     ok = YES;
 
   out:
@@ -250,6 +277,7 @@ extern "C" {
 
   static bool CPSSyncEntryIDs(EVMod *mod) {
     HSP *sp = (HSP *)EVROOTDATA(mod);
+    cps_api_return_code_enum_val_t status;
     bool ok = NO;
     // clear existing ids
     SFLAdaptor *adaptor;
@@ -264,8 +292,10 @@ extern "C" {
     // TARGET key pointing to sFlow entry (yang model "list")
     cps_api_key_from_attr_with_qual(cps_api_object_key(obj), BASE_SFLOW_ENTRY_OBJ, cps_api_qualifier_TARGET);
     // GET
-    if (cps_api_get(&gp) != cps_api_ret_code_OK)
+    if ((status = cps_api_get(&gp)) != cps_api_ret_code_OK) {
+      myDebug(1, "CPSSyncEntryIDs: cps_api_get failed (status=%d)", status);
       goto out;
+    }
     ok = YES;
     size_t mx = cps_api_object_list_size(gp.list);
     for (size_t ix = 0 ; ix < mx ; ix++ ) {
@@ -301,6 +331,7 @@ extern "C" {
     cps_api_transaction_params_t tran;
     if (cps_api_transaction_init(&tran) != cps_api_ret_code_OK )
       return NO;
+    cps_api_return_code_enum_val_t status;
     bool ok = NO;
     cps_api_object_t obj;
     if((obj = cps_api_object_create()) == NULL)
@@ -312,11 +343,15 @@ extern "C" {
     cps_api_object_attr_add_u32(obj, BASE_SFLOW_ENTRY_DIRECTION, BASE_CMN_TRAFFIC_PATH_INGRESS);
     cps_api_object_attr_add_u32(obj, BASE_SFLOW_ENTRY_SAMPLING_RATE, sampling_n);
     // "create" action
-    if(cps_api_create(&tran,obj) != cps_api_ret_code_OK )
+    if((status = cps_api_create(&tran,obj)) != cps_api_ret_code_OK) {
+      myDebug(1, "CPSAddEntry: cps_api_create failed (status=%d)", status);
       goto out;
+    }
     // commit
-    if(cps_api_commit(&tran) != cps_api_ret_code_OK )
+    if((status = cps_api_commit(&tran)) != cps_api_ret_code_OK ) {
+      myDebug(1, "CPSAddEntry: cps_api_commit failed (status=%d)", status);
       goto out;
+    }
     ok = YES;
     // read back new id
     cps_api_object_attr_t attr_id = cps_api_object_attr_get(obj, BASE_SFLOW_ENTRY_ID);
@@ -350,9 +385,9 @@ extern "C" {
     uint32_t id = ADAPTOR_NIO(adaptor)->opx_id;
     cps_api_set_key_data(obj, BASE_SFLOW_ENTRY_ID, cps_api_object_ATTR_T_U32, &id, sizeof(id));
     // GET
-    int status;
+    cps_api_return_code_enum_val_t status;
     if ((status = cps_api_get(&gp)) != cps_api_ret_code_OK) {
-      myLog(LOG_ERR, "CPSGetEntry failed: %d", status);
+      myLog(LOG_ERR, "CPSGetEntry cps_api_get failed (status=%d)", status);
       goto out;
     }
     size_t mx = cps_api_object_list_size(gp.list);
@@ -382,14 +417,54 @@ extern "C" {
     cps_api_get_request_close(&gp);
     return ok;
   }
-
   /*_________________---------------------------__________________
-    _________________      CPSSetEntry          __________________
+    _________________      CPSDeleteEntry       __________________
     -----------------___________________________------------------
-    write attributes to existing entry
   */
 
-  static bool CPSSetEntry(EVMod *mod, SFLAdaptor *adaptor, uint32_t sampling_n) {
+  static bool CPSDeleteEntry(EVMod *mod, SFLAdaptor *adaptor) {
+    // prepare transaction
+    cps_api_transaction_params_t tran;
+    if (cps_api_transaction_init(&tran) != cps_api_ret_code_OK )
+      return NO;
+    cps_api_return_code_enum_val_t status;
+    bool ok = NO;
+    // prepare DELETE
+    cps_api_object_t obj;
+    if((obj = cps_api_object_create()) == NULL)
+      goto out;
+    // TARGET key pointing to sFlow entry (yang model "list")
+    cps_api_key_from_attr_with_qual(cps_api_object_key(obj), BASE_SFLOW_ENTRY_OBJ, cps_api_qualifier_TARGET);
+    // query by ENTRY_ID
+    uint32_t id = ADAPTOR_NIO(adaptor)->opx_id;
+    cps_api_set_key_data(obj, BASE_SFLOW_ENTRY_ID, cps_api_object_ATTR_T_U32, &id, sizeof(id));
+    // DELETE
+    if ((status = cps_api_delete(&tran, obj)) != cps_api_ret_code_OK) {
+      myLog(LOG_ERR, "CPSDeleteEntry cps_api_delete failed (status=%d)", status);
+      goto out;
+    }
+    // commit
+    if((status = cps_api_commit(&tran)) != cps_api_ret_code_OK ) {
+      myDebug(1, "CPSDeleteEntry: cps_api_commit failed (status=%d)", status);
+      goto out;
+    }
+    ok = YES;
+    // clear the id
+    ADAPTOR_NIO(adaptor)->opx_id = 0;
+  out:
+    if(!ok)
+      myLog(LOG_ERR, "CPSDeleteEntry failed");
+    cps_api_transaction_close(&tran);
+    return ok;
+  }
+
+  /*_________________---------------------------__________________
+    _________________   CPSSetEntrySamplingRate __________________
+    -----------------___________________________------------------
+  */
+
+  static bool CPSSetEntrySamplingRate(EVMod *mod, SFLAdaptor *adaptor, uint32_t sampling_n) {
+    cps_api_return_code_enum_val_t status;
     bool ok = NO;
     // prepare transaction
     cps_api_transaction_params_t tran;
@@ -402,20 +477,72 @@ extern "C" {
     uint32_t id = ADAPTOR_NIO(adaptor)->opx_id;
     cps_api_key_from_attr_with_qual(cps_api_object_key(obj), BASE_SFLOW_ENTRY_OBJ, cps_api_qualifier_TARGET);
     cps_api_set_key_data(obj, BASE_SFLOW_ENTRY_ID,cps_api_object_ATTR_T_U32, &id, sizeof(id));
-    cps_api_object_attr_add_u32(obj, BASE_SFLOW_ENTRY_DIRECTION, BASE_CMN_TRAFFIC_PATH_INGRESS);
     cps_api_object_attr_add_u32(obj, BASE_SFLOW_ENTRY_SAMPLING_RATE, sampling_n);
     // SET
-    if (cps_api_set(&tran, obj) != cps_api_ret_code_OK)
+    if ((status = cps_api_set(&tran, obj)) != cps_api_ret_code_OK) {
+      myDebug(1, "CPSSetEntrySamplingRate: cps_api_set failed (status=%d)", status);
       goto out;
-    if(cps_api_commit(&tran) != cps_api_ret_code_OK)
+    }
+    if((status = cps_api_commit(&tran)) != cps_api_ret_code_OK) {
+      myDebug(1, "CPSSetEntrySamplingRate: cps_api_commit failed (status=%d)", status);
       goto out;
+    }
     ok = YES;
 
   out:
     if(!ok)
-      myLog(LOG_ERR, "CPSSetEntry failed");
+      myLog(LOG_ERR, "CPSSetEntrySamplingRate failed");
     cps_api_transaction_close(&tran);
     return ok;
+  }
+
+  /*_________________---------------------------__________________
+    _________________   CPSSetEntrySamplingDirn __________________
+    -----------------___________________________------------------
+  */
+
+  static bool CPSSetEntrySamplingDirn(EVMod *mod, SFLAdaptor *adaptor, uint32_t sampling_dirn) {
+    cps_api_return_code_enum_val_t status;
+    bool ok = NO;
+    // prepare transaction
+    cps_api_transaction_params_t tran;
+    if(cps_api_transaction_init(&tran) != cps_api_ret_code_OK )
+      return false;
+    cps_api_object_t obj = cps_api_object_create();
+    if(obj == NULL)
+      goto out;
+    // TARGET attributes
+    uint32_t id = ADAPTOR_NIO(adaptor)->opx_id;
+    cps_api_key_from_attr_with_qual(cps_api_object_key(obj), BASE_SFLOW_ENTRY_OBJ, cps_api_qualifier_TARGET);
+    cps_api_set_key_data(obj, BASE_SFLOW_ENTRY_ID,cps_api_object_ATTR_T_U32, &id, sizeof(id));
+    cps_api_object_attr_add_u32(obj, BASE_SFLOW_ENTRY_DIRECTION, sampling_dirn);
+    // SET
+    if ((status = cps_api_set(&tran, obj)) != cps_api_ret_code_OK) {
+      myDebug(1, "CPSSetEntrySamplingDirn: cps_api_set failed (status=%d)", status);
+      goto out;
+    }
+    if((status = cps_api_commit(&tran)) != cps_api_ret_code_OK) {
+      myDebug(1, "CPSSetEntrySamplingDirn: cps_api_commit failed (status=%d)", status);
+      goto out;
+    }
+    ok = YES;
+
+  out:
+    if(!ok)
+      myLog(LOG_ERR, "CPSSetEntrySamplingDirn failed");
+    cps_api_transaction_close(&tran);
+    return ok;
+  }
+
+  /*_________________---------------------------__________________
+    _________________      CPSSetEntry          __________________
+    -----------------___________________________------------------
+    write attributes to existing entry
+  */
+
+  static bool CPSSetEntry(EVMod *mod, SFLAdaptor *adaptor, uint32_t sampling_n) {
+    return (CPSSetEntrySamplingRate(mod, adaptor, sampling_n)
+	    && CPSSetEntrySamplingDirn(mod, adaptor, BASE_CMN_TRAFFIC_PATH_INGRESS));
   }
 
   /*_________________---------------------------__________________
@@ -450,26 +577,35 @@ extern "C" {
       // with speed == 0 we can stabilize the startup.
       // Now sampling will only be configured as ports
       // are discovered or come up (or change speed).
+      myDebug(1, "setSamplingRate: do not set: %s ifSpeed==0",
+	      adaptor->deviceName);
       return NO;
     }
 
     if(niostate->switchPort == NO
        || niostate->loopback
        || niostate->bond_master) {
+      myDebug(1, "setSamplingRate: do not set: %s not switchPort component",
+	      adaptor->deviceName);
       return NO;
     }
 
-    if(!CPSSetSamplingRate(mod, adaptor, sampling_n)) {
-      // resync and try again
-      myLog(LOG_INFO, "setSamplingRate: resync and try again");
-      CPSSyncEntryIDs(mod);
+    niostate->sampling_n = sampling_n;
+    if(niostate->sampling_n != niostate->sampling_n_set) {
       if(!CPSSetSamplingRate(mod, adaptor, sampling_n)) {
-	myLog(LOG_ERR, "setSamplingRate: failed to set rate=%u on interface %s (opx_id==%u)",
-	      sampling_n,
-	      adaptor->deviceName,
-	      niostate->opx_id);
-	return NO;
+	// resync, delete and try again
+	myLog(LOG_INFO, "setSamplingRate: resync, delete and try again");
+	CPSSyncEntryIDs(mod);
+	CPSDeleteEntry(mod, adaptor);
+	if(!CPSSetSamplingRate(mod, adaptor, sampling_n)) {
+	  myLog(LOG_ERR, "setSamplingRate: failed to set rate=%u on interface %s (opx_id==%u)",
+		sampling_n,
+		adaptor->deviceName,
+		niostate->opx_id);
+	  return NO;
+	}
       }
+      niostate->sampling_n_set = sampling_n;
     }
     return YES;
   }
@@ -481,6 +617,7 @@ extern "C" {
 
   static bool CPSPollIfState(EVMod *mod, SFLAdaptor *adaptor, SFLHost_nio_counters *ctrs, HSP_ethtool_counters *et_ctrs) {
     HSP *sp = (HSP *)EVROOTDATA(mod);
+    cps_api_return_code_enum_val_t status;
     bool ok = NO;
     HSPAdaptorNIO *nio = ADAPTOR_NIO(adaptor);
     if(!nio->switchPort)
@@ -497,17 +634,19 @@ extern "C" {
 				    cps_api_qualifier_OBSERVED);
 
     cps_api_object_attr_add(obj,IF_INTERFACES_STATE_INTERFACE_TYPE,
-    			    (const char *)IF_INTERFACE_TYPE_IANAIFT_IANA_INTERFACE_TYPE_IANAIFT_ETHERNETCSMACD,
-    			    sizeof(IF_INTERFACE_TYPE_IANAIFT_IANA_INTERFACE_TYPE_IANAIFT_ETHERNETCSMACD));
+			    (const char *)IF_INTERFACE_TYPE_IANAIFT_IANA_INTERFACE_TYPE_IANAIFT_ETHERNETCSMACD,
+			    sizeof(IF_INTERFACE_TYPE_IANAIFT_IANA_INTERFACE_TYPE_IANAIFT_ETHERNETCSMACD));
 
     cps_api_set_key_data(obj,
 			 IF_INTERFACES_STATE_INTERFACE_NAME,
 			 cps_api_object_ATTR_T_BIN,
-    			 adaptor->deviceName,
+			 adaptor->deviceName,
 			 strlen(adaptor->deviceName)+1);
     // GET
-    if (cps_api_get(&gp) != cps_api_ret_code_OK)
+    if ((status = cps_api_get(&gp)) != cps_api_ret_code_OK) {
+      myDebug(1, "CPSPollIfState: cps_api_get failed (status=%d)", status);
       goto out;
+    }
     ok = YES;
     size_t mx = cps_api_object_list_size(gp.list);
     myDebug(1, "CPSPollIfState: get returned %u results", mx);
@@ -546,9 +685,13 @@ extern "C" {
 
 	case IF_INTERFACES_STATE_INTERFACE_SPEED:
 	  speed = cps_api_object_attr_data_u64(it.attr);
+	  if(speed <= OPX_YANG_SPEED_MAP_MAXINDEX) {
+	    speed = opx_yang_speed_map_mbps[speed];
+	    speed *= 1000000LL;
+	  }
 	  // setting the speed may trigger a sampling-rate change
 	  myDebug(1, "ifSpeed=%"PRIu64, speed);
-	  setAdaptorSpeed(sp, adaptor, speed);
+	  setAdaptorSpeed(sp, adaptor, speed, "mod_opx");
 	  break;
 
 	  // TODO: how to get these?
@@ -573,6 +716,7 @@ extern "C" {
 
   static bool CPSPollIfCounters(EVMod *mod, SFLAdaptor *adaptor, SFLHost_nio_counters *ctrs, HSP_ethtool_counters *et_ctrs) {
     bool ok = NO;
+    cps_api_return_code_enum_val_t status;
     HSPAdaptorNIO *nio = ADAPTOR_NIO(adaptor);
     if(!nio->switchPort)
       return NO;
@@ -592,17 +736,19 @@ extern "C" {
 				    cps_api_qualifier_OBSERVED);
 
     cps_api_object_attr_add(obj,IF_INTERFACES_STATE_INTERFACE_TYPE,
-    			    (const char *)IF_INTERFACE_TYPE_IANAIFT_IANA_INTERFACE_TYPE_IANAIFT_ETHERNETCSMACD,
-    			    sizeof(IF_INTERFACE_TYPE_IANAIFT_IANA_INTERFACE_TYPE_IANAIFT_ETHERNETCSMACD));
+			    (const char *)IF_INTERFACE_TYPE_IANAIFT_IANA_INTERFACE_TYPE_IANAIFT_ETHERNETCSMACD,
+			    sizeof(IF_INTERFACE_TYPE_IANAIFT_IANA_INTERFACE_TYPE_IANAIFT_ETHERNETCSMACD));
 
     cps_api_set_key_data(obj,
 			 IF_INTERFACES_STATE_INTERFACE_NAME,
 			 cps_api_object_ATTR_T_BIN,
-    			 adaptor->deviceName,
+			 adaptor->deviceName,
 			 strlen(adaptor->deviceName)+1);
     // GET
-    if (cps_api_get(&gp) != cps_api_ret_code_OK)
+    if ((status = cps_api_get(&gp)) != cps_api_ret_code_OK) {
+      myDebug(1, "CPSPollIfCounters: cps_api_get failed (status=%d)", status);
       goto out;
+    }
     ok = YES;
     size_t mx = cps_api_object_list_size(gp.list);
     myDebug(1, "CPSPollIfCounters: get returned %u results", mx);
@@ -682,15 +828,21 @@ extern "C" {
     HSP *sp = (HSP *)EVROOTDATA(mod);
     HSPAdaptorNIO *nio = ADAPTOR_NIO(adaptor);
 
+    if(nio->loopback
+       || nio->bond_master) {
+      // bond counters will be synthesized - don't try to poll them here
+      return;
+    }
+
     SFLHost_nio_counters ctrs = { 0 };
     HSP_ethtool_counters et_ctrs = { 0 };
     uint64_t allocated1 = cps_api_objects_allocated();
-    
+
     CPSPollIfState(mod, adaptor, &ctrs, &et_ctrs);
     CPSPollIfCounters(mod, adaptor, &ctrs, &et_ctrs);
     accumulateNioCounters(sp, adaptor, &ctrs, &et_ctrs);
     nio->last_update = sp->pollBus->now.tv_sec;
-    
+
     uint64_t allocated2 = cps_api_objects_allocated();
     if(allocated1 != allocated2) {
       myLog(LOG_ERR, "pollCounters(%s): CPS objects not freed=%"PRIu64,
@@ -803,17 +955,16 @@ extern "C" {
 
   static void evt_poll_intf_read(EVMod *mod, EVEvent *evt, void *data, size_t dataLen) {
     SFLAdaptor *adaptor = *(SFLAdaptor **)data;
-    if(markSwitchPort(mod, adaptor)) {
-      HSPAdaptorNIO *nio = ADAPTOR_NIO(adaptor);
-      // turn off the use of ethtool_GSET so it doesn't get the wrong speed
-      // and turn off other ethtool requests because they won't add to the picture
-      nio->ethtool_GSET = NO;
-      nio->ethtool_GLINKSETTINGS = NO;
-      nio->ethtool_GSTATS = NO;
-      nio->ethtool_GDRVINFO = NO;
-      // the /proc/net/dev counters are invalid too
-      nio->procNetDev = NO;
-    }
+    markSwitchPort(mod, adaptor);
+    HSPAdaptorNIO *nio = ADAPTOR_NIO(adaptor);
+    // turn off the use of ethtool_GSET so it doesn't get the wrong speed
+    // and turn off other ethtool requests because they won't add to the picture
+    nio->ethtool_GSET = NO;
+    nio->ethtool_GLINKSETTINGS = NO;
+    nio->ethtool_GSTATS = NO;
+    nio->ethtool_GDRVINFO = NO;
+    // the /proc/net/dev counters are invalid too
+    nio->procNetDev = NO;
   }
 
   /*_________________---------------------------__________________
@@ -889,7 +1040,10 @@ extern "C" {
     // turn off any hardware-sampling that we enabled
     SFLAdaptor *adaptor;
     UTHASH_WALK(sp->adaptorsByName, adaptor) {
-      setSamplingRate(mod, adaptor, 0);
+      if(ADAPTOR_NIO(adaptor)->opx_id) {
+	setSamplingRate(mod, adaptor, 0);
+	CPSDeleteEntry(mod, adaptor);
+      }
     }
   }
 

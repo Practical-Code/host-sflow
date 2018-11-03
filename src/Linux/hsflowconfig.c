@@ -8,6 +8,9 @@ extern "C" {
 
 #include "hsflowd.h"
 
+#define HSP_MAX_SAMPLING_N 10000000
+#define HSP_MAX_POLLING_S 300
+
 #define HSP_MAX_LINELEN 2048
 #define HSP_MAX_CONFIG_DEPTH 3
 #define HSP_SEPARATORS " \t\r\n=;"
@@ -477,8 +480,13 @@ extern "C" {
   {
     for(HSPCollector *coll = settings->collectors; coll; ) {
       HSPCollector *nextColl = coll->nxt;
-      if(coll->socket > 0)
-	close(coll->socket);
+      if(coll->socket > 0) {
+	// treat this as an error condition.  The sockets should
+	// be closed or zeroed in advance. This way it is easier
+	// to create and free configs without incurring unwelcome
+	// side effects.
+	myLog(LOG_ERR, "clearCollectors: socket still open");
+      }
       my_free(coll);
       if(coll->namespace)
 	my_free(coll->namespace);
@@ -493,7 +501,13 @@ extern "C" {
   {
     for(HSPCollector *coll = from->collectors; coll; coll = coll->nxt) {
       HSPCollector *newColl = newCollector(to);
+      HSPCollector *nxtPtr = newColl->nxt;
+      // shallow copy - note this may also copy open socket fd.
       *newColl = *coll;
+      // post copy
+      newColl->nxt = nxtPtr;
+      newColl->namespace = my_strdup(newColl->namespace);
+      newColl->deviceName = my_strdup(newColl->deviceName);
     }
   }
 
@@ -502,13 +516,6 @@ extern "C" {
     ADD_TO_LIST(sp->pcap.pcaps, col);
     sp->pcap.numPcaps++;
     return col;
-  }
-
-  static HSPPort *newOS10Port(HSP *sp) {
-    HSPPort *prt = (HSPPort *)my_calloc(sizeof(HSPPort));
-    ADD_TO_LIST(sp->os10.ports, prt);
-    sp->os10.numPorts++;
-    return prt;
   }
 
   static HSPPort *newOPXPort(HSP *sp) {
@@ -1286,7 +1293,7 @@ extern "C" {
 	    break;
 	  case HSPTOKEN_OS10:
 	    if((tok = expectToken(sp, tok, HSPTOKEN_STARTOBJ)) == NULL) return NO;
-	    sp->os10.os10 = YES;
+	    sp->opx.opx = YES;
 	    level[++depth] = HSPOBJ_OS10;
 	    break;
 	  case HSPTOKEN_OPX:
@@ -1311,11 +1318,11 @@ extern "C" {
 	    break;
 	  case HSPTOKEN_SAMPLING:
 	  case HSPTOKEN_PACKETSAMPLINGRATE:
-	    if((tok = expectInteger32(sp, tok, &sp->sFlowSettings_file->samplingRate, 0, 65535)) == NULL) return NO;
+	    if((tok = expectInteger32(sp, tok, &sp->sFlowSettings_file->samplingRate, 0, HSP_MAX_SAMPLING_N)) == NULL) return NO;
 	    break;
 	  case HSPTOKEN_POLLING:
 	  case HSPTOKEN_COUNTERPOLLINGINTERVAL:
-	    if((tok = expectInteger32(sp, tok, &sp->sFlowSettings_file->pollingInterval, 0, 300)) == NULL) return NO;
+	    if((tok = expectInteger32(sp, tok, &sp->sFlowSettings_file->pollingInterval, 0, HSP_MAX_POLLING_S)) == NULL) return NO;
 	    break;
 	  case HSPTOKEN_AGENTIP:
 	    if((tok = expectIP(sp, tok, &sp->sFlowSettings_file->agentIP, NULL)) == NULL) return NO;
@@ -1375,13 +1382,13 @@ extern "C" {
 	    if(tok->str && strncasecmp(tok->str, "sampling.", 9) == 0) {
 	      char *app = tok->str + 9;
 	      uint32_t sampling_n=0;
-	      if((tok = expectInteger32(sp, tok, &sampling_n, 0, 65535)) == NULL) return NO;
+	      if((tok = expectInteger32(sp, tok, &sampling_n, 0, HSP_MAX_SAMPLING_N)) == NULL) return NO;
 	      setApplicationSampling(sp->sFlowSettings_file, app, sampling_n);
 	    }
 	    else if(tok->str && strncasecmp(tok->str, "polling.", 8) == 0) {
 	      char *app = tok->str + 8;
 	      uint32_t polling_secs=0;
-	      if((tok = expectInteger32(sp, tok, &polling_secs, 0, 300)) == NULL) return NO;
+	      if((tok = expectInteger32(sp, tok, &polling_secs, 0, HSP_MAX_POLLING_S)) == NULL) return NO;
 	      setApplicationPolling(sp->sFlowSettings_file, app, polling_secs);
 	    }
 	    else {
@@ -1619,29 +1626,8 @@ extern "C" {
 	  }
 	  break;
 
+	  // OS10 is now the same as OPX internally (starting with 2.0.17)
 	case HSPOBJ_OS10:
-	  {
-	    switch(tok->stok) {
-	    case HSPTOKEN_UDPPORT:
-	      if((tok = expectInteger32(sp, tok, &sp->os10.port,0,65535)) == NULL) return NO;
-	      break;
-	    case HSPTOKEN_SWITCHPORT:
-	      if((tok = expectRegex(sp, tok, &sp->os10.swp_regex)) == NULL) return NO;
-	      sp->os10.swp_regex_str = my_strdup(tok->str);
-	      break;
-	    case HSPTOKEN_PORT:
-	      if((tok = expectToken(sp, tok, HSPTOKEN_STARTOBJ)) == NULL) return NO;
-	      newOS10Port(sp);
-	      level[++depth] = HSPOBJ_PORT;
-	      break;
-	    default:
-	      unexpectedToken(sp, tok, level[depth]);
-	      return NO;
-	      break;
-	    }
-	  }
-	  break;
-
 	case HSPOBJ_OPX:
 	  {
 	    switch(tok->stok) {
@@ -1669,10 +1655,9 @@ extern "C" {
 	  {
 	    HSPPort *prt = NULL;
 	    if(depth) {
-	      if (level[depth-1] == HSPOBJ_OPX)
+	      if (level[depth-1] == HSPOBJ_OPX
+		  || level[depth-1] == HSPOBJ_OS10)
 		prt = sp->opx.ports;
-	      if (level[depth-1] == HSPOBJ_OS10)
-		prt = sp->os10.ports;
 	    }
 	    if(prt == NULL) {
 	      unexpectedToken(sp, tok, level[depth]);
@@ -1726,6 +1711,9 @@ extern "C" {
 	      break;
 	    case HSPTOKEN_CGROUP_ACCT:
 	      if((tok = expectFormat(sp, tok, &sp->systemd.cgroup_acct)) == NULL) return NO;
+	      break;
+	    case HSPTOKEN_CGROUP_TRAFFIC:
+	      if((tok = expectONOFF(sp, tok, &sp->systemd.markTraffic)) == NULL) return NO;
 	      break;
 	    default:
 	      unexpectedToken(sp, tok, level[depth]);

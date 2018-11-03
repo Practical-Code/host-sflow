@@ -1,11 +1,37 @@
 # This software is distributed under the following license:
 # http://sflow.net/license.html
 
+#########  platform checks  #########
+
+# detect Debian systems
+ifndef DEBIAN
+  DEBIAN=$(shell if [ -r /etc/debian_version ]; then echo "yes"; else echo "no"; fi)
+endif
+
+# detect Red Hat systems
+ifndef REDHAT
+  REDHAT=$(shell if [ -r /etc/redhat-release ]; then echo "yes"; else echo "no"; fi)
+endif
+
+HSFLOWD_INITSCRIPT=scripts/hsflowd
+HSFLOWD_SYSTEMD_SERVICE=scripts/hsflowd.service
+HSFLOWD_DBUS_CONF=scripts/net.sflow.hsflowd.conf
+
+ifeq ($(DEBIAN),yes)
+  HSFLOWD_INITSCRIPT=scripts/hsflowd.deb
+endif
+ifeq ($(REDHAT),yes)
+  HSFLOWD_INITSCRIPT=scripts/hsflowd.redhat
+endif
+
+INSTALL=install
+
+#########  object files  #########
 FEATURES_ALL= ULOG NFLOG PCAP TCP DOCKER KVM XEN NVML OVS CUMULUS OS10 OPX DBUS SYSTEMD EAPI
 FEATURES_CUMULUS= CUMULUS NFLOG SYSTEMD
 FEATURES_EOS= EAPI
-FEATURES_OS10= OS10 DBUS
-FEATURES_OPX= OPX DBUS
+FEATURES_OS10= OS10 DBUS SYSTEMD
+FEATURES_OPX= OPX DBUS SYSTEMD
 FEATURES_XEN= XEN OVS
 FEATURES_HOST= NFLOG PCAP TCP DOCKER KVM OVS DBUS SYSTEMD
 
@@ -33,11 +59,13 @@ ifeq ("$(strip $(FEATURES))","EOS")
 endif
 ifeq ("$(strip $(FEATURES))","OS10")
   XTGTS += $(FEATURES_OS10)
-  CFLAGS_LOAD += -DHSP_LOAD_OS10
+  CFLAGS_LOAD += -DHSP_LOAD_OPX
+  HSFLOWD_SYSTEMD_SERVICE=scripts/hsflowd.service.os10
 endif
 ifeq ("$(strip $(FEATURES))","OPX")
   XTGTS += $(FEATURES_OPX)
   CFLAGS_LOAD += -DHSP_LOAD_OPX
+  HSFLOWD_SYSTEMD_SERVICE=scripts/hsflowd.service.opx
 endif
 ifeq ("$(strip $(FEATURES))","XEN")
   XTGTS += $(FEATURES_XEN)
@@ -57,17 +85,17 @@ MOD_D=$(MODDIR)
 SYSTEMD_D=$(SYSTEMDDIR)
 DBUS_D=$(DBUSDIR)
 ifneq ($(INSTROOT),)
-	BIN_D=$(INSTROOT)/$(BINDIR)
-	INIT_D=$(INSTROOT)/$(INITDIR)
-	CONF_D=$(INSTROOT)/$(CONFDIR)
-	MOD_D=$(INSTROOT)/$(MODDIR)
-	SYSTEMD_D=$(INSTROOT)/$(SYSTEMDDIR)
-	DBUS_D=$(INSTROOT)/$(DBUSDIR)
+	BIN_D=$(INSTROOT)$(BINDIR)
+	INIT_D=$(INSTROOT)$(INITDIR)
+	CONF_D=$(INSTROOT)$(CONFDIR)
+	MOD_D=$(INSTROOT)$(MODDIR)
+	SYSTEMD_D=$(INSTROOT)$(SYSTEMDDIR)
+	DBUS_D=$(INSTROOT)$(DBUSDIR)
 endif
 
 #########  compilation flags  #########
 
-HEADERS= util.h util_dbus.h evbus.h hsflowd.h hsflowtokens.h hsflow_ethtool.h cpu_utils.h Makefile
+HEADERS= util.h util_dbus.h util_netlink.h evbus.h hsflowd.h hsflowtokens.h hsflow_ethtool.h cpu_utils.h Makefile
 
 # compiler
 #CC= g++
@@ -119,7 +147,7 @@ LIBS_NFLOG= -lnfnetlink
 CFLAGS_PCAP=
 LIBS_PCAP=-lpcap
 
-CFLAGS_TCP=
+CFLAGS_TCP= -DHSP_INET_DIAG_USE_DUMP_UDP -DUTIL_NETLINK
 LIBS_TCP=
 
 CFLAGS_NVML= -I/usr/include/nvidia/gdk
@@ -131,14 +159,19 @@ LIBS_CUMULUS=
 CFLAGS_OVS=
 LIBS_OVS=
 
-CFLAGS_OS10=
-LIBS_OS10= -lsystemd
-
 CFLAGS_OPX= -I/usr/include/opx
 LIBS_OPX= -lsystemd -lopx_cps_api_common -lopx_cps_class_map
+# For OS10 the same libraries are under different names:
+ifeq ("$(strip $(FEATURES))","OS10")
+  CFLAGS_OPX= -I/usr/include/ngos
+  LIBS_OPX= -lsystemd -lcps-api-common -lcps-class-map-util
+endif
 
 CFLAGS_DBUS=$(shell pkg-config dbus-1 --cflags)
 LIBS_DBUS=$(shell pkg-config dbus-1 --libs)
+
+CFLAGS_NETLINK=
+LIBS_NETLINK=
 
 CFLAGS_SYSTEMD=$(CFLAGS_DBUS)
 LIBS_SYSTEMD=$(LIBS_DBUS) -lcrypto
@@ -165,32 +198,6 @@ ifeq ($(XENSTORE_H),yes)
   CFLAGS_XEN += -DHSP_XENSTORE_H
 endif
 
-#########  platform checks  #########
-
-# detect Debian systems
-ifndef DEBIAN
-  DEBIAN=$(shell if [ -r /etc/debian_version ]; then echo "yes"; else echo "no"; fi)
-endif
-
-# detect Red Hat systems
-ifndef REDHAT
-  REDHAT=$(shell if [ -r /etc/redhat-release ]; then echo "yes"; else echo "no"; fi)
-endif
-
-HSFLOWD_INITSCRIPT=scripts/hsflowd
-HSFLOWD_SYSTEMD_SERVICE=scripts/hsflowd.service
-HSFLOWD_DBUS_CONF=scripts/net.sflow.hsflowd.conf
-
-ifeq ($(DEBIAN),yes)
-  HSFLOWD_INITSCRIPT=scripts/hsflowd.deb
-endif
-ifeq ($(REDHAT),yes)
-  HSFLOWD_INITSCRIPT=scripts/hsflowd.redhat
-endif
-
-INSTALL=install
-
-#########  object files  #########
 
 OBJS_HSFLOWD= hsflowconfig.o \
               hsflowd.o \
@@ -213,14 +220,13 @@ OBJS_DOCKER=mod_docker.o
 OBJS_ULOG=mod_ulog.o
 OBJS_NFLOG=mod_nflog.o
 OBJS_PCAP=mod_pcap.o
-OBJS_TCP=mod_tcp.o
+OBJS_TCP=mod_tcp.o util_netlink.o
 OBJS_NVML=mod_nvml.o
 OBJS_OVS=mod_ovs.o
 OBJS_CUMULUS=mod_cumulus.o
-OBJS_OS10=mod_os10.o
 OBJS_OPX=mod_opx.o
 OBJS_DBUS=mod_dbus.o util_dbus.o
-OBJS_SYSTEMD=mod_systemd.o util_dbus.o
+OBJS_SYSTEMD=mod_systemd.o util_dbus.o util_netlink.o
 OBJS_EAPI=mod_eapi.o
 
 BUILDTGTS=hsflowd \
@@ -258,7 +264,7 @@ OVS: mod_ovs.so
 
 CUMULUS: mod_cumulus.so
 
-OS10: mod_os10.so
+OS10: mod_opx.so
 
 OPX: mod_opx.so
 
@@ -277,6 +283,11 @@ hsflowd: $(OBJS_HSFLOWD) $(HEADERS)
 
 util_dbus.o: util_dbus.c $(HEADERS)
 	$(CC) $(CFLAGS) -c $*.c $(CFLAGS_DBUS)
+
+######## Netlink utils ##########
+
+util_netlink.o: util_netlink.c $(HEADERS)
+	$(CC) $(CFLAGS) -c $*.c $(CFLAGS_NETLINK)
 
 #########  modules  #########
 
@@ -385,16 +396,6 @@ mod_cumulus.so: $(OBJS_CUMULUS)
 
 #----------------------------
 
-
-mod_os10.o: mod_os10.c $(HEADERS)
-	$(CC) $(CFLAGS) -c $*.c $(CFLAGS_OS10)
-
-mod_os10.so: $(OBJS_OS10)
-	$(LD) -o $@ $(OBJS_OS10) $(LDFLAGS_SHARED) $(LIBS_OS10)
-
-#----------------------------
-
-
 mod_opx.o: mod_opx.c $(HEADERS)
 	$(CC) $(CFLAGS) -c $*.c $(CFLAGS_OPX)
 
@@ -499,7 +500,6 @@ mod_tcp.o: mod_tcp.c $(HEADERS)
 mod_nvml.o: mod_nvml.c $(HEADERS)
 mod_cumulus.o: mod_cumulus.c $(HEADERS)
 mod_ovs.o: mod_ovs.c $(HEADERS)
-mod_os10.o: mod_os10.c $(HEADERS)
 mod_opx.o: mod_opx.c $(HEADERS)
 mod_dbus.o: mod_dbus.c $(HEADERS)
 mod_systemd.o: mod_systemd.c $(HEADERS)
